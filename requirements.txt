@@ -1,0 +1,29 @@
+# Cardio-ODE-Flow — Python dependencies
+# Tested on Python 3.11 + Apple Silicon (M-series) macOS
+#
+# Install:
+#   pip install -r requirements.txt
+#
+# torchdiffeq MUST be installed for the Neural ODE pillar.
+# torch and torchaudio should be installed from pytorch.org
+# (use the Apple Silicon wheel for MPS support):
+#   pip install torch torchvision torchaudio
+
+# ── Core deep learning ──────────────────────────────────────────────────────
+torch>=2.3.0
+torchdiffeq>=0.2.3          # Neural ODE solver (odeint / odeint_adjoint)
+tensorboard>=2.16.0          # training curve logging
+
+# ── ECG data loading ─────────────────────────────────────────────────────────
+wfdb>=4.1.2                  # PTB-XL / Georgia / Chapman WFDB record loading
+scipy>=1.13.0                # polyphase resampling (resample_poly)
+pandas>=2.2.0                # metadata CSV parsing
+numpy>=1.26.0
+
+# ── Evaluation ───────────────────────────────────────────────────────────────
+scikit-learn>=1.4.0          # AUROC, AUPRC, calibration curves
+matplotlib>=3.8.0            # ROC / calibration / confidence plots
+
+# ── Optional but recommended ─────────────────────────────────────────────────
+# neurokit2>=0.2.9           # advanced ECG preprocessing (R-peak detection etc.)
+# pyEDFlib>=0.1.37           # EDF file support for some datasets
