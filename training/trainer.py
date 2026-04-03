@@ -16,6 +16,7 @@ import os
 import time
 import warnings
 import json
+import dataclasses
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -83,15 +84,23 @@ class CheckpointManager:
             "val_auroc": val_auroc,
         }, path)
 
+        # Save config snapshot next to checkpoint for full reproducibility
+        config_path = path.with_suffix(".config.json")
+        with open(config_path, "w") as f:
+            json.dump(dataclasses.asdict(cfg), f, indent=2)
+
         self.history.append((val_auroc, path))
         self.history.sort(key=lambda x: x[0], reverse=True)
 
-        # Remove excess checkpoints
+        # Remove excess checkpoints and their companion config JSONs
         while len(self.history) > self.keep_k:
             _, old_path = self.history.pop()
             if old_path.exists():
                 old_path.unlink()
-                print(f"  Removed old checkpoint: {old_path.name}")
+            old_config = old_path.with_suffix(".config.json")
+            if old_config.exists():
+                old_config.unlink()
+            print(f"  Removed old checkpoint: {old_path.name}")
 
         print(f"  Saved checkpoint: {path.name}  (AUROC={val_auroc:.4f})")
         return path
@@ -165,7 +174,8 @@ def evaluate(
     if _SKLEARN:
         aurocs, auprcs = [], []
         for c, cls_name in enumerate(SUPER_CLASSES):
-            if all_labels[:, c].sum() > 0:
+            n_pos = all_labels[:, c].sum()
+            if n_pos > 0 and n_pos < len(all_labels):   # guard all-zero AND all-positive
                 try:
                     auc = roc_auc_score(all_labels[:, c], all_probs[:, c])
                     ap = average_precision_score(all_labels[:, c], all_probs[:, c])
@@ -179,6 +189,7 @@ def evaluate(
             results["auroc/macro"] = float(np.mean(aurocs))
             results["auprc/macro"] = float(np.mean(auprcs))
 
+    model.train()   # restore training mode after evaluation
     return results
 
 

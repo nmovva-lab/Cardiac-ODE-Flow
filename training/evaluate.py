@@ -22,8 +22,6 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import torch
-import torch.nn as nn
-from torch import Tensor
 
 try:
     import matplotlib
@@ -178,8 +176,6 @@ def plot_confidence_histogram(
 ):
     if not _MPL:
         return
-    # Compare confidence distribution for correct vs incorrect predictions
-    pred = (confidences > 0.5).astype(float)
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.hist(confidences, bins=40, alpha=0.7, color="steelblue", label="All samples")
     ax.set_xlabel("Confidence Score")
@@ -192,6 +188,33 @@ def plot_confidence_histogram(
     fig.savefig(path, dpi=150)
     plt.close(fig)
     print(f"  Saved: {path}")
+
+
+def _compute_metrics(probs: np.ndarray, labels: np.ndarray) -> Dict:
+    """Compute AUROC/AUPRC/Brier per class and macro."""
+    if not _SKLEARN:
+        return {}
+    results: Dict = {}
+    aurocs, auprcs, briers = [], [], []
+    for c, cls_name in enumerate(SUPER_CLASSES):
+        if labels[:, c].sum() > 0 and labels[:, c].sum() < len(labels):
+            try:
+                auc = roc_auc_score(labels[:, c], probs[:, c])
+                ap = average_precision_score(labels[:, c], probs[:, c])
+                brier = brier_score_loss(labels[:, c], probs[:, c])
+                results[cls_name] = {"auroc": auc, "auprc": ap, "brier": brier}
+                aurocs.append(auc)
+                auprcs.append(ap)
+                briers.append(brier)
+            except Exception:
+                pass
+    if aurocs:
+        results["macro"] = {
+            "auroc": float(np.mean(aurocs)),
+            "auprc": float(np.mean(auprcs)),
+            "brier": float(np.mean(briers)),
+        }
+    return results
 
 
 # ── Main evaluation ───────────────────────────────────────────────────────────
@@ -209,84 +232,88 @@ def full_evaluation(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load model
     model = CardioODEFlow(cfg).to(device)
     CheckpointManager.load(checkpoint_path, model, device=device)
     model.eval()
 
-    # Data
     print("\nLoading test set...")
     loaders = build_dataloaders(cfg.data)
     test_loader = loaders.get("test")
     if test_loader is None:
         raise RuntimeError("No test data available.")
 
-    # Collect all outputs
-    all_probs, all_labels, all_confidences = [], [], []
-    from training.loss import HybridLoss
-    loss_fn = HybridLoss()
+    # Collect outputs, tracking source dataset per sample for per-dataset breakdown
+    all_probs, all_labels, all_confidences, all_sources = [], [], [], []
 
     for batch in test_loader:
         ecg = batch["ecg"].to(device)
         labels = batch["label"].to(device)
         age = batch["age"].to(device)
         sex = batch["sex"].to(device)
+        sources = batch["source"]   # list of strings
 
         out = model(ecg, age, sex)
         all_probs.append(out["probs"].cpu().numpy())
         all_labels.append(labels.cpu().numpy())
         all_confidences.append(out["confidence"].cpu().numpy())
+        all_sources.extend(sources)
 
     probs = np.concatenate(all_probs, axis=0)
     labels = np.concatenate(all_labels, axis=0)
     confidences = np.concatenate(all_confidences, axis=0)
+    sources = np.array(all_sources)
 
-    print(f"\nTest set size: {len(probs)}")
+    print(f"\nTest set: {len(probs)} samples")
 
-    # Compile results
-    results: Dict = {"n_test": len(probs), "classes": SUPER_CLASSES}
+    results: Dict = {"n_test": int(len(probs)), "classes": SUPER_CLASSES}
 
-    if _SKLEARN:
-        aurocs, auprcs, briers = [], [], []
-        for c, cls_name in enumerate(SUPER_CLASSES):
-            if labels[:, c].sum() > 0:
-                auc = roc_auc_score(labels[:, c], probs[:, c])
-                ap = average_precision_score(labels[:, c], probs[:, c])
-                brier = brier_score_loss(labels[:, c], probs[:, c])
-                results[cls_name] = {"auroc": auc, "auprc": ap, "brier": brier}
-                aurocs.append(auc)
-                auprcs.append(ap)
-                briers.append(brier)
-                print(f"  {cls_name:6s}  AUROC={auc:.4f}  AUPRC={ap:.4f}  Brier={brier:.4f}")
+    # ── Pooled metrics ────────────────────────────────────────────────────────
+    pooled = _compute_metrics(probs, labels)
+    results["pooled"] = pooled
+    if "macro" in pooled:
+        print(f"\n  [Pooled]  Macro AUROC={pooled['macro']['auroc']:.4f}  "
+              f"AUPRC={pooled['macro']['auprc']:.4f}")
+    for cls_name in SUPER_CLASSES:
+        if cls_name in pooled:
+            m = pooled[cls_name]
+            print(f"    {cls_name:6s}  AUROC={m['auroc']:.4f}  "
+                  f"AUPRC={m['auprc']:.4f}  Brier={m['brier']:.4f}")
 
-        results["macro"] = {
-            "auroc": float(np.mean(aurocs)),
-            "auprc": float(np.mean(auprcs)),
-            "brier": float(np.mean(briers)),
-        }
-        results["ece"] = expected_calibration_error(probs, labels)
-        results["confidence_stats"] = {
-            "mean": float(confidences.mean()),
-            "std": float(confidences.std()),
-            "min": float(confidences.min()),
-            "max": float(confidences.max()),
-        }
-        results["confidence_stratification"] = confidence_stratification(
-            probs, labels, confidences, threshold=0.5
-        )
+    # ── Per-dataset breakdown ─────────────────────────────────────────────────
+    results["per_dataset"] = {}
+    for ds_name in sorted(set(all_sources)):
+        mask = sources == ds_name
+        if mask.sum() < 10:
+            continue
+        ds_metrics = _compute_metrics(probs[mask], labels[mask])
+        results["per_dataset"][ds_name] = ds_metrics
+        macro = ds_metrics.get("macro", {})
+        print(f"\n  [{ds_name}]  N={mask.sum()}  "
+              f"Macro AUROC={macro.get('auroc', float('nan')):.4f}  "
+              f"AUPRC={macro.get('auprc', float('nan')):.4f}")
 
-        print(f"\n  Macro AUROC:  {results['macro']['auroc']:.4f}")
-        print(f"  Macro AUPRC:  {results['macro']['auprc']:.4f}")
-        print(f"  ECE:          {results['ece']:.4f}")
-        print(f"  Conf mean:    {results['confidence_stats']['mean']:.4f}")
+    # ── Calibration ───────────────────────────────────────────────────────────
+    results["ece"] = expected_calibration_error(probs, labels)
+    results["confidence_stats"] = {
+        "mean": float(confidences.mean()),
+        "std": float(confidences.std()),
+        "min": float(confidences.min()),
+        "max": float(confidences.max()),
+    }
+    results["confidence_stratification"] = confidence_stratification(
+        probs, labels, confidences, threshold=0.5
+    )
 
-    # Save JSON
+    print(f"\n  ECE:         {results['ece']:.4f}")
+    print(f"  Conf mean:   {results['confidence_stats']['mean']:.4f}")
+
+    # ── Save JSON ─────────────────────────────────────────────────────────────
     json_path = out_dir / "test_results.json"
     with open(json_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\n  Saved: {json_path}")
 
-    # Plots
+    # ── Plots ─────────────────────────────────────────────────────────────────
     plot_roc_curves(probs, labels, out_dir)
     plot_calibration(probs, labels, out_dir)
     plot_confidence_histogram(confidences, labels, out_dir)
