@@ -108,6 +108,8 @@ class GraphAttentionLayer(nn.Module):
         mask = (A == 0).unsqueeze(0)
         e = e.masked_fill(mask, float("-inf"))
         alpha = F.softmax(e, dim=-1)                         # (B, N, N)
+        # Replace NaN rows (fully-masked nodes) with uniform attention — safe fallback
+        alpha = torch.nan_to_num(alpha, nan=0.0)
         alpha = self.dropout(alpha)
 
         # Modulate by anatomical prior

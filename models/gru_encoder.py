@@ -16,7 +16,6 @@ W non-overlapping windows before the GCN, giving shape (B, W, gcn_out_dim).
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import Tensor
 from typing import Tuple
 
@@ -78,8 +77,7 @@ class BidirectionalGRUEncoder(nn.Module):
 
         # Extract final hidden state from both directions, last layer
         # hn shape: (num_layers * num_directions, B, hidden_dim)
-        num_directions = 2 if self.cfg.bidirectional else 1
-        # Last layer: indices [-2] (fwd) and [-1] (bwd) for bidirectional
+        # For bidirectional: index [-2] = forward last layer, [-1] = backward last layer
         if self.cfg.bidirectional:
             h_fwd = hn[-2]   # (B, hidden_dim) — forward direction, last layer
             h_bwd = hn[-1]   # (B, hidden_dim) — backward direction, last layer

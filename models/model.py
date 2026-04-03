@@ -26,9 +26,8 @@ Forward returns a named dict so downstream code is explicit.
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import Tensor
-from typing import Dict, Optional
+from typing import Dict
 
 from configs.config import Config, ModelConfig
 from models.gcn import AnatomicalGCN, LeadTemporalEncoder
@@ -200,8 +199,10 @@ class CardioODEFlow(nn.Module):
         logits = self.classifier(h_final)                  # (B, num_classes)
         probs = torch.sigmoid(logits)                      # multi-label
 
-        # ── Confidence score
-        confidence = self.flow.confidence_score(h_final)   # (B,)
+        # ── Confidence score (derived from already-computed log_prob — no second forward pass)
+        # sigmoid(log_prob / D) gives a [0,1] score: high = in-distribution, confident.
+        # At inference time, model.predict() calls flow.confidence_score() explicitly.
+        confidence = torch.sigmoid(log_prob.detach() / self.flow.latent_dim)
 
         output = {
             "logits": logits,

@@ -20,7 +20,6 @@ References:
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import Tensor
 from typing import Tuple, List
 
@@ -151,6 +150,10 @@ class RealNVP(nn.Module):
 
     def __init__(self, cfg: FlowConfig):
         super().__init__()
+        assert cfg.latent_dim % 2 == 0, (
+            f"RealNVP requires even latent_dim for symmetric coupling splits, "
+            f"got {cfg.latent_dim}. Set flow.latent_dim to an even number."
+        )
         self.latent_dim = cfg.latent_dim
         dim = cfg.latent_dim
 

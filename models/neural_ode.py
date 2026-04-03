@@ -22,7 +22,6 @@ Key benefits over a standard RNN:
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import Tensor
 from typing import Tuple, Optional
 
@@ -93,6 +92,17 @@ class ODEFunc(nn.Module):
 
         # Time embedding: scalar t → 16-dim sinusoidal
         self.time_embed_dim = 16
+        assert self.time_embed_dim >= 4 and self.time_embed_dim % 2 == 0, \
+            "time_embed_dim must be even and >= 4"
+
+        half = self.time_embed_dim // 2
+        # Pre-compute frequency vector; avoid division by zero when half == 1
+        denom = max(half - 1, 1)
+        freqs = torch.exp(
+            -torch.arange(half).float() * (torch.log(torch.tensor(10000.0)) / denom)
+        )
+        self.register_buffer("_freqs", freqs)   # (half,) — moves with .to(device)
+
         in_dim = cfg.latent_dim + self.time_embed_dim + cfg.context_dim
 
         # MLP layers with gated linear units for smooth dynamics
@@ -124,14 +134,10 @@ class ODEFunc(nn.Module):
 
     def _time_embedding(self, t: Tensor, B: int) -> Tensor:
         """Sinusoidal time embedding, broadcast to batch."""
-        freqs = torch.exp(
-            torch.arange(self.time_embed_dim // 2, device=t.device)
-            * -(torch.log(torch.tensor(10000.0)) / (self.time_embed_dim // 2 - 1))
-        )                                              # (dim/2,)
-        t_val = t.squeeze() if t.dim() > 0 else t     # scalar
-        args = t_val * freqs                           # (dim/2,)
-        embed = torch.cat([args.sin(), args.cos()])    # (dim,)
-        return embed.unsqueeze(0).expand(B, -1)        # (B, dim)
+        t_val = t.squeeze()           # scalar
+        args = t_val * self._freqs    # (half,) — freqs already on correct device
+        embed = torch.cat([args.sin(), args.cos()])    # (time_embed_dim,)
+        return embed.unsqueeze(0).expand(B, -1)        # (B, time_embed_dim)
 
     def forward(self, t: Tensor, h: Tensor) -> Tensor:
         """
@@ -182,8 +188,12 @@ class NeuralODE(nn.Module):
     def __init__(self, cfg: ODEConfig):
         super().__init__()
         self.cfg = cfg
+        # ODEFunc lives permanently on CPU — torchdiffeq dopri5 is not MPS-compatible.
+        # ContextEncoder stays on the main device; its output is moved to CPU before injection.
         self.odefunc = ODEFunc(cfg)
         self.context_encoder = ContextEncoder(cfg.context_dim)
+        # Permanently place odefunc on CPU at init time (not moved during forward).
+        self.odefunc = self.odefunc.cpu()
 
     def forward(
         self,
@@ -205,22 +215,19 @@ class NeuralODE(nn.Module):
         """
         original_device = h0.device
 
-        # Encode patient context
+        # Encode patient context on the main device (MPS/CUDA/CPU).
         context = self.context_encoder(age, sex)       # (B, context_dim)
-        self.odefunc.set_context(context)
 
-        # ── MPS/device fallback: move ODE computation to CPU ──────────────────
-        # torchdiffeq dopri5 does not support MPS backend.
-        ode_device = torch.device("cpu")
-        h0_cpu = h0.to(ode_device)
-        t_span_cpu = t_span.to(ode_device)
+        # odefunc is permanently on CPU — inject context there.
+        self.odefunc.set_context(context.detach().cpu())
 
-        # Move odefunc parameters to CPU for integration
-        self.odefunc = self.odefunc.to(ode_device)
-        if self.odefunc._context is not None:
-            self.odefunc._context = self.odefunc._context.to(ode_device)
+        # Move h0 and t_span to CPU for the solver.
+        # Do NOT detach h0 — the adjoint method needs the computation graph
+        # rooted at h0 to back-propagate gradients through the GRU/GCN.
+        h0_cpu = h0.to("cpu")
+        t_span_cpu = t_span.to("cpu")
 
-        # ── Solve ODE ─────────────────────────────────────────────────────────
+        # ── Solve ODE (always on CPU) ──────────────────────────────────────────
         ode_kwargs = dict(
             rtol=self.cfg.rtol,
             atol=self.cfg.atol,
@@ -233,10 +240,7 @@ class NeuralODE(nn.Module):
             h_traj = odeint_plain(self.odefunc, h0_cpu, t_span_cpu, **ode_kwargs)
         # h_traj: (T_out, B, latent_dim)
 
-        # Move odefunc back to original device for parameter updates
-        self.odefunc = self.odefunc.to(original_device)
-
-        # Move trajectory back to original device
+        # Move result back to the original device.
         h_traj = h_traj.to(original_device)
         h_final = h_traj[-1]                           # (B, latent_dim)
 
