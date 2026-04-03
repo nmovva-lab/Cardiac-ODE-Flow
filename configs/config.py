@@ -3,7 +3,6 @@ Cardio-ODE-Flow: Central configuration.
 All hyperparameters live here — edit this file to run ablations.
 """
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 
 @dataclass
@@ -85,6 +84,13 @@ class ModelConfig:
     num_classes: int = 5              # diagnostic risk classes
     classifier_hidden_dim: int = 256
     classifier_dropout: float = 0.2
+
+    def __post_init__(self):
+        """Enforce that dependent dimensions are consistent across sub-configs."""
+        # GRU input must equal GCN output
+        self.gru.input_dim = self.graph.gcn_output_dim
+        # Flow latent dim must equal ODE latent dim (they share the same space)
+        self.flow.latent_dim = self.ode.latent_dim
 
 
 @dataclass
