@@ -53,20 +53,19 @@ def cmd_sanity(args):
     print("\n── Cardio-ODE-Flow sanity check ──────────────────────────────")
     cfg = get_config()
 
-    # Reduce sizes for fast check
-    cfg.data.sequence_length = 1000
+    # Reduce sizes for a fast check — modify only the root dims,
+    # then let __post_init__ propagate dependent dims automatically.
+    cfg.data.sequence_length = 1000   # must be divisible by NUM_WINDOWS=10 → 100 per window
     cfg.model.graph.gcn_hidden_dim = 32
     cfg.model.graph.gcn_output_dim = 64
     cfg.model.graph.gcn_layers = 2
     cfg.model.gru.hidden_dim = 64
     cfg.model.ode.latent_dim = 64
     cfg.model.ode.ode_hidden_dim = 128
-    cfg.model.flow.latent_dim = 64
     cfg.model.flow.num_coupling_layers = 2
     cfg.model.flow.hidden_dim = 64
-
-    # Sync dims
-    cfg.model.gru.input_dim = cfg.model.graph.gcn_output_dim
+    # Propagate: gru.input_dim = gcn_output_dim, flow.latent_dim = ode.latent_dim
+    cfg.model.__post_init__()
 
     from training.trainer import get_device
     from models.model import CardioODEFlow
@@ -107,8 +106,12 @@ def cmd_sanity(args):
     loss.backward()
     print("  ✓ Backward pass succeeded")
 
-    # Check all parameters have gradients
-    no_grad = [n for n, p in model.named_parameters() if p.requires_grad and p.grad is None]
+    # Check for missing gradients — odefunc lives on CPU so filter it out
+    # (its grads accumulate on CPU and are valid, just on a different device)
+    no_grad = [
+        n for n, p in model.named_parameters()
+        if p.requires_grad and p.grad is None and "odefunc" not in n
+    ]
     if no_grad:
         print(f"  ⚠ Parameters without gradient: {no_grad}")
     else:
